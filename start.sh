@@ -13,9 +13,7 @@ SSH_AUTHORIZED_KEYS="${SSH_AUTHORIZED_KEYS:-}"
 SSH_PASSWORD="${SSH_PASSWORD:-}"
 CF_TUNNEL_TOKEN="${CF_TUNNEL_TOKEN:-}"
 CF_TUNNEL_HOSTNAME="${CF_TUNNEL_HOSTNAME:-}"
-CF_OLLAMA_HOSTNAME="${CF_OLLAMA_HOSTNAME:-}"
 LOG_FILE="/tmp/cloudflared.log"
-OLLAMA_LOG_FILE="/tmp/ollama.log"
 
 bool_is_true() {
     case "${1,,}" in
@@ -53,6 +51,14 @@ require_tunnel_config() {
     fail "Set CF_TUNNEL_TOKEN for a named Cloudflare tunnel, or explicitly allow CF_USE_QUICK_TUNNEL=true for dev usage."
 }
 
+require_user_password() {
+    if [ -n "$SSH_PASSWORD" ]; then
+        return 0
+    fi
+
+    fail "Set SSH_PASSWORD so the runtime user can authenticate with sudo."
+}
+
 setup_persistent_storage() {
     mkdir -p "$PERSISTENT_DIR/home" "$PERSISTENT_DIR/root" "$PERSISTENT_DIR/ssh"
 }
@@ -88,9 +94,12 @@ ensure_user() {
         chmod 600 "$user_home/.ssh/authorized_keys"
     fi
 
-    if [ -n "$SSH_PASSWORD" ]; then
-        echo "$SSH_USERNAME:$SSH_PASSWORD" | chpasswd
-    fi
+    echo "$SSH_USERNAME:$SSH_PASSWORD" | chpasswd
+
+    cat > "/etc/sudoers.d/$SSH_USERNAME" <<EOF
+$SSH_USERNAME ALL=(ALL:ALL) PASSWD: ALL
+EOF
+    chmod 440 "/etc/sudoers.d/$SSH_USERNAME"
 }
 
 write_sshd_config() {
@@ -132,18 +141,11 @@ start_sshd() {
     /usr/sbin/sshd
 }
 
-start_ollama() {
-    mkdir -p "$OLLAMA_MODELS"
-    rm -f "$OLLAMA_LOG_FILE"
-    ollama serve > "$OLLAMA_LOG_FILE" 2>&1 &
-}
-
 print_summary() {
     echo "=========================================================="
     echo "SSH server ready"
     echo "User: $SSH_USERNAME"
     echo "Persistent data: $PERSISTENT_DIR"
-    echo "Ollama models: $OLLAMA_MODELS"
 
     if [ -n "$CF_TUNNEL_HOSTNAME" ]; then
         echo "SSH hostname: $CF_TUNNEL_HOSTNAME"
@@ -157,12 +159,6 @@ print_summary() {
         fi
     else
         echo "SSH hostname: use the hostname configured on your Cloudflare named tunnel"
-    fi
-
-    if [ -n "$CF_OLLAMA_HOSTNAME" ]; then
-        echo "Ollama URL: https://$CF_OLLAMA_HOSTNAME"
-    elif [ -n "$CF_TUNNEL_TOKEN" ]; then
-        echo "Ollama URL: configure a separate hostname on your named tunnel for http://localhost:11434"
     fi
 
     echo "=========================================================="
@@ -191,15 +187,15 @@ start_cloudflared() {
     # ================================================================
 
     print_summary
-    exec tail -f "$LOG_FILE" "$OLLAMA_LOG_FILE"
+    exec tail -f "$LOG_FILE"
 }
 
 require_ssh_auth
 require_tunnel_config
+require_user_password
 setup_persistent_storage
 setup_host_keys
 ensure_user
 write_sshd_config
 start_sshd
-start_ollama
 start_cloudflared
